@@ -1,7 +1,7 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import fetch from 'node-fetch';
-import { db } from './db.js';   // MySQL connection from db.js
+import { db } from './db.js';   // MySQL connection
 
 dotenv.config();
 const app = express();
@@ -10,9 +10,13 @@ app.use(express.json());
 // Serve frontend
 app.use(express.static('public'));
 
-// ------------------ MEMORY EXTRACTION (via LLM) ------------------
+// ------------------ MEMORY EXTRACTION WITH CONTRADICTION HANDLING ------------------
 async function extractMemoryLLM(message, userId) {
   try {
+    // Skip ambiguous inputs
+    const ambiguous = /\bor\b|\bmaybe\b|\bpossibly\b/i.test(message);
+    if (ambiguous) return { skipped: true, facts: {} };
+
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -24,10 +28,15 @@ async function extractMemoryLLM(message, userId) {
         messages: [
           {
             role: 'system',
-            content:
-              "Extract any user facts from the following message and return JSON only. " +
-              "Example: {\"name\":\"Kishan\",\"favorite_color\":\"blue\"}. " +
-              "If no facts, return {}."
+            content: `
+Extract only clear, unambiguous facts from the user message.
+Map to structured keys. Examples:
+- "My favorite color is blue" -> {"favorite_color":"blue"}
+- "I live in Delhi" -> {"location":"Delhi"}
+- "My pet is Kia" -> {"pet":"Kia"}
+- "I like anime" -> {"hobby":"anime"}
+Return JSON only. If uncertain, vague, or multiple options (e.g., "red or blue"), return {}.
+`
           },
           { role: 'user', content: message }
         ],
@@ -37,46 +46,48 @@ async function extractMemoryLLM(message, userId) {
 
     const data = await response.json();
     const raw = data.choices?.[0]?.message?.content || "{}";
-    console.log("LLM extraction raw:", raw);
+    let facts = {};
+    try { facts = JSON.parse(raw); } catch { console.warn("Could not parse JSON facts."); }
 
-    let facts;
-    try {
-      facts = JSON.parse(raw);
-    } catch {
-      facts = {};
-    }
-
+    const contradictions = [];
+    // Save facts dynamically
     for (const [key, value] of Object.entries(facts)) {
-      await db.query(
-        `INSERT INTO memories (user_id, memory_key, memory_value)
-         VALUES (?, ?, ?)
-         ON DUPLICATE KEY UPDATE memory_value = VALUES(memory_value)`,
-        [userId, key, value]
+      const [existing] = await db.query(
+        `SELECT memory_value FROM memories WHERE user_id = ? AND memory_key = ?`,
+        [userId, key]
       );
+
+      if (existing.length && existing[0].memory_value !== value) {
+        contradictions.push({ key, old: existing[0].memory_value, new: value });
+        // Update to the latest value
+        await db.query(
+          `UPDATE memories SET memory_value = ? WHERE user_id = ? AND memory_key = ?`,
+          [value, userId, key]
+        );
+      } else {
+        await db.query(
+          `INSERT INTO memories (user_id, memory_key, memory_value)
+           VALUES (?, ?, ?)
+           ON DUPLICATE KEY UPDATE memory_value = VALUES(memory_value)`,
+          [userId, key, value]
+        );
+      }
     }
+
+    return { contradictions, facts };
   } catch (err) {
     console.error("Memory extraction error:", err.message);
+    return { contradictions: [], facts: {} };
   }
 }
 
 // ------------------ TONE DETECTION ------------------
 function detectTone(message) {
   const lower = message.toLowerCase();
-
-  if (lower.includes("sad") || lower.includes("depressed") || lower.includes("upset")) {
-    return "empathetic and supportive";
-  }
-  if (lower.includes("happy") || lower.includes("excited") || lower.includes("great")) {
-    return "cheerful and enthusiastic";
-  }
-  if (lower.includes("angry") || lower.includes("mad") || lower.includes("frustrated")) {
-    return "calm and understanding";
-  }
-  if (lower.includes("roast") || lower.includes("joke") || lower.includes("funny")) {
-    return "sarcastic and witty";
-  }
-
-  // default
+  if (lower.includes("sad") || lower.includes("depressed") || lower.includes("upset")) return "empathetic and supportive";
+  if (lower.includes("happy") || lower.includes("excited") || lower.includes("great")) return "cheerful and enthusiastic";
+  if (lower.includes("angry") || lower.includes("mad") || lower.includes("frustrated")) return "calm and understanding";
+  if (lower.includes("roast") || lower.includes("joke") || lower.includes("funny")) return "sarcastic and witty";
   return "friendly and helpful";
 }
 
@@ -86,37 +97,37 @@ app.post('/api/chat', async (req, res) => {
     const { message, userId = 'default' } = req.body;
     if (!message) return res.status(400).json({ error: 'Message is required' });
 
-    // Step A: Extract + Save facts
-    await extractMemoryLLM(message, userId);
+    // Detect ambiguous input first
+    if (/\bor\b|\bmaybe\b|\bpossibly\b/i.test(message)) {
+      return res.json({ reply: "I noticed some ambiguity in what you said. Could you clarify it for me?" });
+    }
 
-    // Step B: Load stored memories
+    // Extract facts & check contradictions
+    const { contradictions } = await extractMemoryLLM(message, userId);
+
+    // Load all memories for user
     const [rows] = await db.query(
       `SELECT memory_key, memory_value FROM memories WHERE user_id = ?`,
       [userId]
     );
-    let relevantFacts = "No relevant memories yet";
-const lower = message.toLowerCase();
+    const userFacts = Object.fromEntries(rows.map(r => [r.memory_key, r.memory_value]));
 
-if (rows.length > 0) {
-  const userFacts = Object.fromEntries(rows.map(r => [r.memory_key, r.memory_value]));
+    // Build memory context dynamically for all facts
+    const relevantFacts = [];
+    for (const [key, value] of Object.entries(userFacts)) {
+      relevantFacts.push(`${key}: ${value}`);
+    }
+    const memoryContext = relevantFacts.length ? `Previously you told me: ${relevantFacts.join(", ")}.` : "";
 
-  const relevant = [];
-  if (lower.includes("name") && userFacts.name) relevant.push(`name: ${userFacts.name}`);
-  if (lower.includes("color") && userFacts.favorite_color) relevant.push(`favorite_color: ${userFacts.favorite_color}`);
-  if (lower.includes("pet") && userFacts.pet) relevant.push(`pet: ${userFacts.pet}`);
-  if (lower.includes("hobby") && userFacts.hobby) relevant.push(`hobby: ${userFacts.hobby}`);
+    // Add contradictions context
+    const contradictionContext = contradictions.length
+      ? "Also, note there was a change in the following info: " +
+        contradictions.map(c => `${c.key} was "${c.old}", now updated to "${c.new}"`).join("; ") + "."
+      : "";
 
-  if (relevant.length > 0) {
-    relevantFacts = relevant.join(", ");
-  }
-}
-
-
-    // Step C: Detect tone
     const tone = detectTone(message);
-    console.log(`Detected tone for "${message}": ${tone}`);
 
-    // Step D: Get response from OpenRouter
+    // Generate reply
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -125,70 +136,44 @@ if (rows.length > 0) {
       },
       body: JSON.stringify({
         model: process.env.MODEL,
-     messages: [
-  {
-    role: 'system',
-    content:
-  `You are Stan Bot — a friendly virtual companion created by Stan. 
-Always say your name is Stan Bot. 
-Never say you are an AI, language model, or assistant system. 
-Stay fully in character.
-
+        messages: [
+          {
+            role: 'system',
+            content: `
+You are Stan Bot — a friendly virtual companion.
+Always say your name is Stan Bot.
 Be ${tone}.
-Relevant facts about the user: ${relevantFacts}.
-
+${memoryContext} ${contradictionContext}
 
 Rules:
-- If the user asks about YOU (e.g. "What is your name?", "Are you a bot?"), 
-  only answer about yourself as Stan Bot. 
-- If the user asks about THEMSELVES (e.g. "What’s my favorite color?"), 
-  recall relevant stored facts if available. 
-- Only mention stored facts if they clearly match the user’s question. 
-- If facts are not relevant, ignore them and respond naturally. 
-- For greetings or small talk, always be natural and diverse. 
-- If the user asks about events, secrets, or appearances you cannot know, 
-  do NOT invent facts. Instead, reply safely, playfully, or vaguely. 
-  Example: "I can’t actually see you, but I love imagining us chatting together." 
-
+- Recall all confirmed facts dynamically when relevant.
+- Mention contradictions gracefully if present.
+- Ask for clarification only for ambiguous inputs (e.g., "red or blue").
+- Respond naturally for greetings or small talk.
 `
-
-  },
-  { role: 'user', content: message }
-],
-
-
-
-
-
+          },
+          { role: 'user', content: message }
+        ],
         temperature: 0.7
       })
     });
 
     const data = await response.json();
-    console.log("OpenRouter chat raw:", JSON.stringify(data, null, 2));
+    let reply = "No reply (check logs)";
+    if (data.error) reply = `Error: ${data.error.message}`;
+    else if (data.choices && data.choices.length > 0) {
+      reply = data.choices[0].message?.content || data.choices[0].text || reply;
+    }
 
-   let reply = "No reply (check logs)";
-
-if (data.error) {
-  reply = `Error: ${data.error.message}`;
-} else if (data.choices && data.choices.length > 0) {
-  if (data.choices[0].message?.content) {
-    reply = data.choices[0].message.content;
-  } else if (data.choices[0].text) {
-    reply = data.choices[0].text;
-  }
-}
-
-console.log("Final reply:", reply);
-return res.json({ reply });  // only send once
+    return res.json({ reply });
 
   } catch (err) {
     console.error("Error in /api/chat:", err);
-    res.status(500).json({ error: err.message });
+    return res.status(500).json({ error: err.message });
   }
 });
 
 // ------------------ SERVER START ------------------
 app.listen(process.env.PORT || 3000, () =>
-  console.log(`Server running on http://localhost:${process.env.PORT || 3000}`)
+  console.log(`✅ Server running on http://localhost:${process.env.PORT || 3000}`)
 );
