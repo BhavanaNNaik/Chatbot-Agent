@@ -114,15 +114,16 @@ app.post('/api/chat', async (req, res) => {
   {
     role: 'system',
     content:
-      `You are Stan Bot. Be ${tone}. 
-       You know these facts about the user: ${facts}. 
-       Use these facts naturally to personalize your replies, not only when directly asked. 
-       For example, if the user likes anime, suggest anime when they ask about shows. 
-       If they shared hobbies, connect your answers to those hobbies. 
-       Always stay consistent with remembered facts.`
+      `You are Stan Bot. Be ${tone}.
+       You know these facts about the user: ${facts}.
+       Use these facts naturally to personalize replies. 
+       For casual greetings or small talk (like "hi", "hello", "what's up"), 
+       always respond with diverse, engaging, and non-repetitive answers. 
+       Avoid repeating the same phrase if the user greets multiple times.`
   },
   { role: 'user', content: message }
 ],
+
 
 
 
