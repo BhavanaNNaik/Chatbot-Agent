@@ -99,6 +99,7 @@ app.post('/api/chat', async (req, res) => {
 
     // Step C: Detect tone
     const tone = detectTone(message);
+    console.log(`Detected tone for "${message}": ${tone}`);
 
     // Step D: Get response from OpenRouter
     const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
@@ -109,15 +110,22 @@ app.post('/api/chat', async (req, res) => {
       },
       body: JSON.stringify({
         model: process.env.MODEL,
-        messages: [
-          {
-            role: 'system',
-            content:
-              `You are Stan Bot. Be ${tone}. Remember these facts about the user: ${facts}. ` +
-              `If asked, recall them consistently.`
-          },
-          { role: 'user', content: message }
-        ],
+      messages: [
+  {
+    role: 'system',
+    content:
+      `You are Stan Bot. Be ${tone}. 
+       You know these facts about the user: ${facts}. 
+       Use these facts naturally to personalize your replies, not only when directly asked. 
+       For example, if the user likes anime, suggest anime when they ask about shows. 
+       If they shared hobbies, connect your answers to those hobbies. 
+       Always stay consistent with remembered facts.`
+  },
+  { role: 'user', content: message }
+],
+
+
+
         temperature: 0.7
       })
     });
