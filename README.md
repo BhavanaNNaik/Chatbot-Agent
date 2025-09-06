@@ -1,4 +1,15 @@
---->Conversational Chatbot Agent
+# Conversational Chatbot Agent
+
+## Overview   
+It implements a **human-like chatbot** with long-term memory, context-aware responses, and empathetic tone adaptation. The chatbot remembers user details, adapts its responses over time, and maintains identity consistency while avoiding hallucinations.  
+
+---
+
+## Objective  
+- Deliver natural and engaging conversations.  
+- Adapt personality and tone based on input.  
+- Store and recall user-specific information across sessions.  
+- Ensure identity consistency and safe, grounded answers.  
 
 
 ## Features
@@ -22,7 +33,7 @@
 
 ## Setup Instructions
 
-1. Clone Repository
+### 1. Clone Repository  
 ```bash
 git clone https://github.com/BhavanaNNaik/Chatbot-Agent.git
 cd stan-bot
@@ -56,3 +67,35 @@ CREATE TABLE memories (
 5. Start the Server
 npm start
 
+Access at: http://localhost:3000
+
+
+->Usage
+
+Start chatting with Stan Bot.
+
+Example prompts:
+
+“Hi, my name is Alex.” → Bot remembers your name.
+
+“I love football.” → Bot recalls this in future sessions.
+
+“I’m feeling sad today.” → Bot adapts empathetic tone.
+
+Try switching sessions to test memory recall.
+
+->Test Cases & Validation
+
+Memory Recall: Bot remembers name & preferences.
+
+Tone Adaptation: Bot adapts to moods (“sad”, “happy”).
+
+Personalization Over Time: Brings up hobbies in later chats.
+
+Naturalness: Diverse greetings & responses.
+
+Identity Consistency: Always answers as Stan Bot.
+
+Hallucination Resistance: Avoids fabricating false memories.
+
+Contradiction Handling: Updates memory when facts change.
