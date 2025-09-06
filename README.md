@@ -104,8 +104,8 @@ Contradiction Handling: Updates memory when facts change.
 
 
 
-- GitHub: [Chatbot-Agent](https://github.com/BhavanaNNaik/Chatbot-Agent)  
-- Video Demo: [Watch Video](https://drive.google.com/file/d/1xVEwWGr6AIbS-yDH8VRJQ8V2Umth8CfO/preview)
+- GitHub: https://github.com/BhavanaNNaik/Chatbot-Agent
+- Video Demo: https://drive.google.com/file/d/1xVEwWGr6AIbS-yDH8VRJQ8V2Umth8CfO/preview
 
 
 
