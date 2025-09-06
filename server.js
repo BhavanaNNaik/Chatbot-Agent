@@ -1,19 +1,27 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import fetch from 'node-fetch';
-import { db } from './db.js';   // MySQL connection
+import session from 'express-session';
+import { db } from './db.js';
 
 dotenv.config();
 const app = express();
 app.use(express.json());
 
+// Setup session 
+app.use(session({
+  secret: 'stanbot_secret_key',
+  resave: false,
+  saveUninitialized: true
+}));
+
 // Serve frontend
 app.use(express.static('public'));
 
-// ------------------ MEMORY EXTRACTION WITH CONTRADICTION HANDLING ------------------
+// MEMORY EXTRACTION WITH CONTRADICTION HANDLING
 async function extractMemoryLLM(message, userId) {
   try {
-    // Skip ambiguous inputs
+   
     const ambiguous = /\bor\b|\bmaybe\b|\bpossibly\b/i.test(message);
     if (ambiguous) return { skipped: true, facts: {} };
 
@@ -29,8 +37,8 @@ async function extractMemoryLLM(message, userId) {
           {
             role: 'system',
             content: `
-Extract only clear, unambiguous facts from the user message.
-Map to structured keys. Examples:
+Extract only clear, unambiguous facts from the USER's message.
+Always map them to structured keys. Examples:
 - "My favorite color is blue" -> {"favorite_color":"blue"}
 - "I live in Delhi" -> {"location":"Delhi"}
 - "My pet is Kia" -> {"pet":"Kia"}
@@ -81,7 +89,7 @@ Return JSON only. If uncertain, vague, or multiple options (e.g., "red or blue")
   }
 }
 
-// ------------------ TONE DETECTION ------------------
+// TONE DETECTION
 function detectTone(message) {
   const lower = message.toLowerCase();
   if (lower.includes("sad") || lower.includes("depressed") || lower.includes("upset")) return "empathetic and supportive";
@@ -91,78 +99,97 @@ function detectTone(message) {
   return "friendly and helpful";
 }
 
-// ------------------ CHAT ENDPOINT ------------------
+// CHAT ENDPOINT 
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message, userId = 'default' } = req.body;
+    const { message } = req.body;
     if (!message) return res.status(400).json({ error: 'Message is required' });
 
-    // Detect ambiguous input first
-    if (/\bor\b|\bmaybe\b|\bpossibly\b/i.test(message)) {
-      return res.json({ reply: "I noticed some ambiguity in what you said. Could you clarify it for me?" });
-    }
+    // Session-based userId
+    if (!req.session.userId) req.session.userId = `user_${Date.now()}`;
+    const userId = req.session.userId;
 
-    // Extract facts & check contradictions
-    const { contradictions } = await extractMemoryLLM(message, userId);
+    //Extract facts & update memory
+    const { contradictions, facts } = await extractMemoryLLM(message, userId);
 
-    // Load all memories for user
+    //Load latest memory
     const [rows] = await db.query(
       `SELECT memory_key, memory_value FROM memories WHERE user_id = ?`,
       [userId]
     );
     const userFacts = Object.fromEntries(rows.map(r => [r.memory_key, r.memory_value]));
 
-    // Build memory context dynamically for all facts
-    const relevantFacts = [];
-    for (const [key, value] of Object.entries(userFacts)) {
-      relevantFacts.push(`${key}: ${value}`);
+    //Handle "What's my name?" queries
+    if (/what(?:'s| is) my name/i.test(message)) {
+      const name = userFacts.name;
+      const reply = name ? `Your name is ${name}!` : "I don’t think you’ve told me your name yet.";
+      return res.json({ reply });
     }
-    const memoryContext = relevantFacts.length ? `Previously you told me: ${relevantFacts.join(", ")}.` : "";
 
-    // Add contradictions context
+    //Build memory context
+    const relevantFacts = [];
+    if (userFacts.name) relevantFacts.push(`Your name is ${userFacts.name}`);
+    if (userFacts.favorite_color) relevantFacts.push(`Your favorite color is ${userFacts.favorite_color}`);
+    if (userFacts.hobby) relevantFacts.push(`You enjoy ${userFacts.hobby}`);
+    if (userFacts.location) relevantFacts.push(`You live in ${userFacts.location}`);
+
+    const memoryContext = relevantFacts.length
+      ? `Facts about the user: ${relevantFacts.join(", ")}.`
+      : "";
+
     const contradictionContext = contradictions.length
-      ? "Also, note there was a change in the following info: " +
-        contradictions.map(c => `${c.key} was "${c.old}", now updated to "${c.new}"`).join("; ") + "."
+      ? "Also, note there was a change in the following user info: " +
+        contradictions.map(c => `${c.key} was "${c.old}", now "${c.new}"`).join("; ") + "."
       : "";
 
     const tone = detectTone(message);
 
-    // Generate reply
-    const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: process.env.MODEL,
-        messages: [
-          {
-            role: 'system',
-            content: `
+    // Generate LLM reply 
+    let reply = "No reply (check logs)";
+    try {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        },
+        body: JSON.stringify({
+          model: process.env.MODEL,
+          messages: [
+            {
+              role: 'system',
+              content: `
 You are Stan Bot — a friendly virtual companion.
 Always say your name is Stan Bot.
 Be ${tone}.
+
 ${memoryContext} ${contradictionContext}
 
 Rules:
-- Recall all confirmed facts dynamically when relevant.
+- If the user asks about YOUR identity, always answer: "I am Stan Bot, a friendly virtual companion."
+- Use USER’s facts naturally.
+- Never confuse USER’s facts with your own identity.
+- For greetings or small talk, keep replies short and natural.
 - Mention contradictions gracefully if present.
-- Ask for clarification only for ambiguous inputs (e.g., "red or blue").
-- Respond naturally for greetings or small talk.
 `
-          },
-          { role: 'user', content: message }
-        ],
-        temperature: 0.7
-      })
-    });
+            },
+            { role: 'user', content: message }
+          ],
+          temperature: 0.7
+        })
+      });
 
-    const data = await response.json();
-    let reply = "No reply (check logs)";
-    if (data.error) reply = `Error: ${data.error.message}`;
-    else if (data.choices && data.choices.length > 0) {
-      reply = data.choices[0].message?.content || data.choices[0].text || reply;
+      const data = await response.json();
+      if (data.error) reply = `Error: ${data.error.message}`;
+      else if (data.choices && data.choices.length > 0) {
+        reply = data.choices[0].message?.content || data.choices[0].text || reply;
+      }
+
+    } catch (err) {
+      console.warn("API request failed, using fallback reply:", err.message);
+      const userName = userFacts.name || "there";
+      const hobby = userFacts.hobby ? `, and it seems you enjoy ${userFacts.hobby} as a hobby` : "";
+      reply = `I am Stan Bot, a friendly virtual companion. Your name is ${userName}${hobby}. How can I assist you today?`;
     }
 
     return res.json({ reply });
@@ -173,7 +200,7 @@ Rules:
   }
 });
 
-// ------------------ SERVER START ------------------
+//SERVER START 
 app.listen(process.env.PORT || 3000, () =>
   console.log(`✅ Server running on http://localhost:${process.env.PORT || 3000}`)
 );
